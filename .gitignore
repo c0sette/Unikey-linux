@@ -1,0 +1,6 @@
+# Build artifacts
+*.o
+unikey
+
+# IDE
+.vscode/
