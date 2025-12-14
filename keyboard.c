@@ -25,7 +25,7 @@ static bool ctrl_pressed = false;
 static bool shift_pressed = false;
 
 // Timeout for word reset (milliseconds)
-#define WORD_TIMEOUT_MS 400
+#define WORD_TIMEOUT_MS 250
 
 static void signal_handler(int sig) {
     (void)sig;
@@ -222,7 +222,7 @@ void keyboard_run(void) {
         int rc = libevdev_next_event(dev, LIBEVDEV_READ_FLAG_NORMAL | LIBEVDEV_READ_FLAG_BLOCKING, &ev);
         if (rc < 0) {
             if (rc == -EAGAIN) {
-                usleep(1000);
+                usleep(500);
                 continue;
             }
             break;
@@ -293,13 +293,26 @@ void keyboard_run(void) {
             int old_len = current_word.len;
             Word backup = current_word;
 
-            bool transformed = telex_process(&current_word, c);
+            int result = telex_process(&current_word, c);
 
-            if (transformed) {
+            if (result == 1) {
+                // Normal transformation
                 char utf8_buf[MAX_WORD_LEN * 4 + 1];
                 word_to_utf8(&current_word, utf8_buf, sizeof(utf8_buf));
 
                 // Single wtype call: backspaces + new text
+                wtype_replace(old_len + 1, utf8_buf);
+                continue;
+            } else if (result == 2) {
+                // Double press: undo tone and add the key char
+                // Add the key to buffer
+                if (current_word.len < MAX_WORD_LEN - 1) {
+                    current_word.chars[current_word.len++] = (uint32_t)c;
+                }
+                char utf8_buf[MAX_WORD_LEN * 4 + 1];
+                word_to_utf8(&current_word, utf8_buf, sizeof(utf8_buf));
+
+                // Replace: old word + pressed key -> new word with key
                 wtype_replace(old_len + 1, utf8_buf);
                 continue;
             }

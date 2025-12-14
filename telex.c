@@ -49,6 +49,7 @@ void telex_init(void) {}
 
 void telex_reset(Word *word) {
     word->len = 0;
+    word->cancelled_tone = 0;
 }
 
 // Fast vowel lookup using cache
@@ -198,23 +199,30 @@ static void normalize_tone_position(Word *word) {
 }
 
 // Apply tone (freedom typing: works from any position)
-static bool apply_tone(Word *word, int tone) {
+// Returns: 0 = no change, 1 = tone applied, 2 = tone removed (double press)
+static int apply_tone_ex(Word *word, int tone) {
     int pos = find_tone_position(word);
-    if (pos < 0) return false;
+    if (pos < 0) return 0;
 
     int row = find_vowel_row(word->chars[pos]);
-    if (row < 0) return false;
+    if (row < 0) return 0;
 
     int current = get_tone(word->chars[pos]);
 
     if (tone == 0) {
-        if (current == 0) return false;
+        if (current == 0) return 0;
         word->chars[pos] = vowel_table[row][0];
-        return true;
+        return 1;
     }
 
-    word->chars[pos] = vowel_table[row][current == tone ? 0 : tone];
-    return true;
+    // Double press same tone key: remove tone and return special code
+    if (current == tone) {
+        word->chars[pos] = vowel_table[row][0];
+        return 2;  // Signal: tone removed, add the key char
+    }
+
+    word->chars[pos] = vowel_table[row][tone];
+    return 1;
 }
 
 // Handle 'w' key
@@ -285,36 +293,64 @@ static bool handle_d(Word *word) {
     return false;
 }
 
-bool telex_process(Word *word, char key) {
-    if (word->len >= MAX_WORD_LEN - 1) return false;
+// Returns: 0 = no change, 1 = transformed, 2 = undo (double press, add key char)
+int telex_process(Word *word, char key) {
+    if (word->len >= MAX_WORD_LEN - 1) return 0;
 
     char k = tolower(key);
+    int result;
+    int tone_for_key = 0;
+
+    // Map key to tone
+    switch (k) {
+        case 's': tone_for_key = 1; break;
+        case 'f': tone_for_key = 2; break;
+        case 'r': tone_for_key = 3; break;
+        case 'x': tone_for_key = 4; break;
+        case 'j': tone_for_key = 5; break;
+    }
+
+    // If this tone was previously cancelled, don't apply it again - just add the char
+    if (tone_for_key > 0 && word->cancelled_tone == tone_for_key) {
+        return 0;  // Signal: no transformation, keyboard.c will add char normally
+    }
 
     // Tone marks (freedom typing: apply to correct position automatically)
     switch (k) {
-        case 's': if (apply_tone(word, 1)) return true; break;
-        case 'f': if (apply_tone(word, 2)) return true; break;
-        case 'r': if (apply_tone(word, 3)) return true; break;
-        case 'x': if (apply_tone(word, 4)) return true; break;
-        case 'j': if (apply_tone(word, 5)) return true; break;
-        case 'z': if (apply_tone(word, 0)) return true; break;
+        case 's': result = apply_tone_ex(word, 1); break;
+        case 'f': result = apply_tone_ex(word, 2); break;
+        case 'r': result = apply_tone_ex(word, 3); break;
+        case 'x': result = apply_tone_ex(word, 4); break;
+        case 'j': result = apply_tone_ex(word, 5); break;
+        case 'z': result = apply_tone_ex(word, 0); break;
+        default: result = 0; break;
+    }
+
+    if (result == 2) {
+        // Double press: mark this tone as cancelled
+        word->cancelled_tone = tone_for_key;
+        return 2;
+    } else if (result == 1) {
+        // Tone applied: clear any previous cancellation
+        word->cancelled_tone = 0;
+        return 1;
     }
 
     // Vowel modifications
     switch (k) {
         case 'a': case 'e': case 'o':
-            if (handle_double_vowel(word, key)) return true;
+            if (handle_double_vowel(word, key)) return 1;
             break;
         case 'w':
-            if (handle_w(word)) return true;
+            if (handle_w(word)) return 1;
             break;
         case 'd':
-            if (handle_d(word)) return true;
+            if (handle_d(word)) return 1;
             break;
     }
 
     // No transformation happened
-    return false;
+    return 0;
 }
 
 // Public wrappers

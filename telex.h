@@ -9,13 +9,15 @@
 typedef struct {
     uint32_t chars[MAX_WORD_LEN];  // UTF-32 codepoints
     int len;
+    int cancelled_tone;  // Tone that was cancelled (1-5), 0 = none
 } Word;
 
 // Initialize telex engine
 void telex_init(void);
 
-// Process a key press, returns true if word was modified
-bool telex_process(Word *word, char key);
+// Process a key press
+// Returns: 0 = no change, 1 = transformed, 2 = undo (double press, add key char)
+int telex_process(Word *word, char key);
 
 // Reset current word
 void telex_reset(Word *word);
