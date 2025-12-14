@@ -72,6 +72,35 @@ ninja -C build
 sudo ninja -C build install
 ```
 
+## Cấu hình tốc độ gõ
+
+Mở file `keyboard.c` và chỉnh 2 thông số sau phù hợp với tốc độ gõ của bạn:
+
+### 1. WORD_TIMEOUT_MS (dòng 28)
+
+```c
+#define WORD_TIMEOUT_MS 400
+```
+
+Thời gian (milliseconds) để reset buffer từ khi ngừng gõ.
+- **Gõ nhanh**: giảm xuống `200-300`
+- **Gõ chậm**: tăng lên `500-800`
+- Nếu từ bị reset giữa chừng khi gõ → tăng giá trị này
+- Nếu từ trước dính vào từ sau → giảm giá trị này
+
+### 2. usleep (dòng 225)
+
+```c
+usleep(1000);
+```
+
+Thời gian nghỉ (microseconds) khi không có sự kiện bàn phím.
+- `1000` = 1ms (mặc định, cân bằng)
+- `500` = 0.5ms (phản hồi nhanh hơn, CPU cao hơn chút)
+- `2000` = 2ms (tiết kiệm CPU hơn)
+
+> **Lưu ý**: Sau khi chỉnh sửa, cần compile lại: `make clean && make`
+
 ## Compile
 
 ```bash

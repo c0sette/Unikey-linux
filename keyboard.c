@@ -25,7 +25,7 @@ static bool ctrl_pressed = false;
 static bool shift_pressed = false;
 
 // Timeout for word reset (milliseconds)
-#define WORD_TIMEOUT_MS 300
+#define WORD_TIMEOUT_MS 400
 
 static void signal_handler(int sig) {
     (void)sig;
@@ -221,7 +221,10 @@ void keyboard_run(void) {
     while (running != 0) {
         int rc = libevdev_next_event(dev, LIBEVDEV_READ_FLAG_NORMAL | LIBEVDEV_READ_FLAG_BLOCKING, &ev);
         if (rc < 0) {
-            if (rc == -EAGAIN) continue;
+            if (rc == -EAGAIN) {
+                usleep(1000);
+                continue;
+            }
             break;
         }
 
