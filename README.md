@@ -1,3 +1,7 @@
+### Tại sao
+Ibus-bamboo ,unikey,fcxit5 like a shit, quá nhiều gạch chân và không tập trung vấn đề chính
+Bộ gõ này sẽ đỡ hơn 1 chút , nhưng nó sẽ cần thêm thời gian để cải thiện
+Cảm ơn
 # Unikey-linux
 
 Bộ gõ tiếng Việt cho Wayland Linux.
