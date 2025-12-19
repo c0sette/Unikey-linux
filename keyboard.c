@@ -10,32 +10,25 @@
 #include <errno.h>
 #include <signal.h>
 #include <sys/wait.h>
-#include <sys/time.h>
 #include <linux/input.h>
 #include <libevdev/libevdev.h>
+
 static struct libevdev *dev = NULL;
 static int fd = -1;
 static volatile sig_atomic_t running = 1;
 static bool vietnamese_mode = true;
 static Word current_word;
-static struct timeval last_key_time;
 
-// Key state tracking
-static bool ctrl_pressed = false;
+// Modifier state
 static bool shift_pressed = false;
-
-// Timeout for word reset (milliseconds)
-#define WORD_TIMEOUT_MS 250
+static bool ctrl_pressed = false;
 
 static void signal_handler(int sig) {
     (void)sig;
     running = 0;
 }
 
-// Minimum score: keyboard should have most letter keys + enter + space
-#define MIN_KEYBOARD_SCORE 20
-
-// Find best keyboard device
+// Find keyboard device
 static char* find_keyboard(void) {
     char path[64];
     int best_score = 0;
@@ -76,57 +69,40 @@ static char* find_keyboard(void) {
         close(test_fd);
     }
 
-    if (best_score < MIN_KEYBOARD_SCORE) {
-        return NULL;
-    }
-
-    char *result = strdup(best_path);
-    if (!result) {
-        perror("strdup");
-    }
-    return result;
+    return (best_score >= 20) ? strdup(best_path) : NULL;
 }
 
-// Optimized wtype: combine backspaces and text into single call
-static void wtype_replace(int backspace_count, const char *text) {
-    // Build command: wtype -k BackSpace ... -- "text"
+// Send backspaces + text via wtype (single call for efficiency)
+static void wtype_replace(int bs_count, const char *text) {
     char *args[128];
     int idx = 0;
     args[idx++] = "wtype";
 
-    // Add backspaces
-    for (int i = 0; i < backspace_count && idx < 100; i++) {
+    for (int i = 0; i < bs_count && idx < 100; i++) {
         args[idx++] = "-k";
         args[idx++] = "BackSpace";
     }
 
-    // Add text if provided
     if (text && *text) {
         args[idx++] = "--";
         args[idx++] = (char*)text;
     }
-
     args[idx] = NULL;
 
     pid_t pid = fork();
     if (pid == 0) {
-        // Silence stderr
         int devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
         execvp("wtype", args);
         _exit(1);
     } else if (pid > 0) {
-        int status;
-        waitpid(pid, &status, 0);
+        waitpid(pid, NULL, 0);
     }
 }
 
-// Fast keycode to ASCII lookup
-#define KEYCODE_MAP_SIZE 64
-_Static_assert(KEY_Z < KEYCODE_MAP_SIZE, "Keycode map size too small for KEY_Z");
-
-static char keycode_to_ascii(int code, bool shift) {
-    static const char map[KEYCODE_MAP_SIZE] = {
+// Key to character
+static char key_to_char(int code, bool shift) {
+    static const char map[64] = {
         [KEY_A] = 'a', [KEY_B] = 'b', [KEY_C] = 'c', [KEY_D] = 'd',
         [KEY_E] = 'e', [KEY_F] = 'f', [KEY_G] = 'g', [KEY_H] = 'h',
         [KEY_I] = 'i', [KEY_J] = 'j', [KEY_K] = 'k', [KEY_L] = 'l',
@@ -135,21 +111,12 @@ static char keycode_to_ascii(int code, bool shift) {
         [KEY_U] = 'u', [KEY_V] = 'v', [KEY_W] = 'w', [KEY_X] = 'x',
         [KEY_Y] = 'y', [KEY_Z] = 'z',
     };
-
-    if (code < 0 || code >= KEYCODE_MAP_SIZE) return 0;
+    if (code < 0 || code >= 64) return 0;
     char c = map[code];
-    return (c && shift) ? (c - 'a' + 'A') : c;
+    return (c && shift) ? (c - 32) : c;
 }
 
-// Check if key breaks word
-static inline bool is_word_break(int code) {
-    return code == KEY_SPACE || code == KEY_ENTER || code == KEY_TAB ||
-           code == KEY_ESC || code == KEY_LEFT || code == KEY_RIGHT ||
-           code == KEY_UP || code == KEY_DOWN || code == KEY_HOME ||
-           code == KEY_END || code == KEY_DELETE || code == KEY_BACKSPACE;
-}
-
-// Telex transformation keys
+// Telex keys that can trigger transformation
 static inline bool is_telex_key(int code) {
     return code == KEY_S || code == KEY_F || code == KEY_R ||
            code == KEY_X || code == KEY_J || code == KEY_Z ||
@@ -157,12 +124,23 @@ static inline bool is_telex_key(int code) {
            code == KEY_W || code == KEY_D;
 }
 
-// Check if word timed out (user paused typing)
-static inline bool check_word_timeout(const struct timeval *now) {
-    if (last_key_time.tv_sec == 0) return false;
-    long diff_ms = (now->tv_sec - last_key_time.tv_sec) * 1000 +
-                   (now->tv_usec - last_key_time.tv_usec) / 1000;
-    return diff_ms > WORD_TIMEOUT_MS;
+// Keys that break word context
+static inline bool is_word_break(int code) {
+    return code == KEY_SPACE || code == KEY_ENTER || code == KEY_TAB ||
+           code == KEY_ESC || code == KEY_LEFT || code == KEY_RIGHT ||
+           code == KEY_UP || code == KEY_DOWN || code == KEY_HOME ||
+           code == KEY_END || code == KEY_DELETE || code == KEY_PAGEUP ||
+           code == KEY_PAGEDOWN;
+}
+
+// Punctuation/number keys
+static inline bool is_punct_key(int code) {
+    return (code >= KEY_1 && code <= KEY_0) ||
+           code == KEY_MINUS || code == KEY_EQUAL ||
+           code == KEY_LEFTBRACE || code == KEY_RIGHTBRACE ||
+           code == KEY_SEMICOLON || code == KEY_APOSTROPHE ||
+           code == KEY_GRAVE || code == KEY_BACKSLASH ||
+           code == KEY_COMMA || code == KEY_DOT || code == KEY_SLASH;
 }
 
 int keyboard_init(void) {
@@ -188,7 +166,6 @@ int keyboard_init(void) {
     free(devpath);
 
     if (libevdev_new_from_fd(fd, &dev) < 0) {
-        perror("libevdev_new_from_fd");
         close(fd);
         return -1;
     }
@@ -207,7 +184,6 @@ void keyboard_toggle_vietnamese(void) {
     vietnamese_mode = !vietnamese_mode;
     telex_reset(&current_word);
     printf("\rMode: %s      \n", vietnamese_mode ? "VI" : "EN");
-    fflush(stdout);
 }
 
 bool keyboard_is_vietnamese(void) {
@@ -216,79 +192,76 @@ bool keyboard_is_vietnamese(void) {
 
 void keyboard_run(void) {
     struct input_event ev;
-    struct timeval now;
 
-    while (running != 0) {
+    while (running) {
         int rc = libevdev_next_event(dev, LIBEVDEV_READ_FLAG_NORMAL | LIBEVDEV_READ_FLAG_BLOCKING, &ev);
         if (rc < 0) {
-            if (rc == -EAGAIN) {
-                usleep(500);
-                continue;
-            }
+            if (rc == -EAGAIN) { usleep(1000); continue; }
             break;
         }
 
         if (ev.type != EV_KEY) continue;
 
-        // Get current time for timeout check
-        gettimeofday(&now, NULL);
-
-        // Reset word if user paused typing
-        if (current_word.len > 0 && check_word_timeout(&now)) {
-            telex_reset(&current_word);
-        }
-
         // Track modifiers
-        if (ev.code == KEY_LEFTCTRL || ev.code == KEY_RIGHTCTRL) {
-            ctrl_pressed = (ev.value != 0);
-            continue;
-        }
         if (ev.code == KEY_LEFTSHIFT || ev.code == KEY_RIGHTSHIFT) {
             shift_pressed = (ev.value != 0);
             continue;
         }
+        if (ev.code == KEY_LEFTCTRL || ev.code == KEY_RIGHTCTRL) {
+            ctrl_pressed = (ev.value != 0);
+            continue;
+        }
 
-        // Only key press
+        // Only key press (not release or repeat)
         if (ev.value != 1) continue;
 
-        // Toggle
+        // Ctrl+Space toggle
         if (ev.code == KEY_SPACE && ctrl_pressed) {
             keyboard_toggle_vietnamese();
             continue;
         }
+        // Skip if Ctrl held (shortcuts)
+        if (ctrl_pressed) {
+            telex_reset(&current_word);
+            continue;
+        }
 
-        // English mode - ignore
-        if (!vietnamese_mode) continue;
-
-        // Backspace - sync buffer with actual deletion
-        if (ev.code == KEY_BACKSPACE) {
-            if (current_word.len > 0) {
-                current_word.len--;
-            }
-            // If buffer empty, ensure clean state
-            if (current_word.len == 0) {
+        // English mode - just track buffer for sync
+        if (!vietnamese_mode) {
+            char c = key_to_char(ev.code, shift_pressed);
+            if (c && current_word.len < MAX_WORD_LEN - 1) {
+                current_word.chars[current_word.len++] = c;
+            } else if (is_word_break(ev.code) || is_punct_key(ev.code)) {
                 telex_reset(&current_word);
+            } else if (ev.code == KEY_BACKSPACE && current_word.len > 0) {
+                current_word.len--;
             }
             continue;
         }
 
+        // Vietnamese mode
+
+        // Backspace
+        if (ev.code == KEY_BACKSPACE) {
+            if (current_word.len > 0) current_word.len--;
+            if (current_word.len == 0) telex_reset(&current_word);
+            continue;
+        }
+
         // Word break
-        if (is_word_break(ev.code)) {
+        if (is_word_break(ev.code) || is_punct_key(ev.code)) {
             telex_reset(&current_word);
             continue;
         }
 
         // Get character
-        char c = keycode_to_ascii(ev.code, shift_pressed);
+        char c = key_to_char(ev.code, shift_pressed);
         if (!c) {
             telex_reset(&current_word);
             continue;
         }
 
-        // Update last key time for timeout tracking
-        last_key_time = now;
-
-        // Process Telex
+        // Try telex transformation
         if (is_telex_key(ev.code) && current_word.len > 0) {
             int old_len = current_word.len;
             Word backup = current_word;
@@ -296,36 +269,30 @@ void keyboard_run(void) {
             int result = telex_process(&current_word, c);
 
             if (result == 1) {
-                // Normal transformation
-                char utf8_buf[MAX_WORD_LEN * 4 + 1];
-                word_to_utf8(&current_word, utf8_buf, sizeof(utf8_buf));
-
-                // Single wtype call: backspaces + new text
-                wtype_replace(old_len + 1, utf8_buf);
+                // Transformation succeeded
+                // Delete old text + the key just typed, then type new text
+                char utf8[MAX_WORD_LEN * 4 + 1];
+                word_to_utf8(&current_word, utf8, sizeof(utf8));
+                wtype_replace(old_len + 1, utf8);
                 continue;
             } else if (result == 2) {
-                // Double press: undo tone and add the key char
-                // Add the key to buffer
+                // Double press - undo and add the char
                 if (current_word.len < MAX_WORD_LEN - 1) {
-                    current_word.chars[current_word.len++] = (uint32_t)c;
+                    current_word.chars[current_word.len++] = c;
                 }
-                char utf8_buf[MAX_WORD_LEN * 4 + 1];
-                word_to_utf8(&current_word, utf8_buf, sizeof(utf8_buf));
-
-                // Replace: old word + pressed key -> new word with key
-                wtype_replace(old_len + 1, utf8_buf);
+                char utf8[MAX_WORD_LEN * 4 + 1];
+                word_to_utf8(&current_word, utf8, sizeof(utf8));
+                wtype_replace(old_len + 1, utf8);
                 continue;
             }
+
+            // No transformation, restore
             current_word = backup;
         }
 
-        // Add to buffer
+        // Just add to buffer (original keystroke goes through naturally)
         if (current_word.len < MAX_WORD_LEN - 1) {
-            current_word.chars[current_word.len++] = (uint32_t)c;
-            // Smart tone: move tone to correct position after adding vowel
-            if (telex_is_vowel(c)) {
-                telex_normalize_tone(&current_word);
-            }
+            current_word.chars[current_word.len++] = c;
         }
     }
 }
